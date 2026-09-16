@@ -182,6 +182,7 @@ def prepare_director_plan(
     i2v_groups=None,
     r2v_groups=None,
     refine=None,
+    external_prev_video=None,
 ):
     from ..director.external_groups import (
         build_plan_from_external_groups,
@@ -224,6 +225,7 @@ def prepare_director_plan(
             ref_max_size=ref_max_size,
         )
         plan = _attach_refine(plan, refine)
+        plan.external_prev_video = external_prev_video
         log.info(
             "MiniMax H3 Director: external %s groups × %d (task=%s) | %s",
             family,
@@ -250,6 +252,7 @@ def prepare_director_plan(
         ref_max_size=ref_max_size,
     )
     plan = _attach_refine(plan, refine)
+    plan.external_prev_video = external_prev_video
     log.info(plan_summary(plan).replace("\n", " | "))
     return plan
 

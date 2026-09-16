@@ -307,6 +307,11 @@ class DirectorPlan:
     external_groups_witness: dict | None = None
     # Set during execute when export_mode=segments (minimax_seg_export folder).
     segment_mp4_run_dir: str | None = None
+    # External video frames for inter-segment guidance (段间引导).
+    # When set, segment 2+ uses the tail of this video as motion context
+    # instead of requiring the Director to have generated the previous segment.
+    # Shape: [T, H, W, C] float32 in [0, 1]. From Load Video or similar node.
+    external_prev_video: torch.Tensor | None = None
 
     @property
     def segment_count(self) -> int:

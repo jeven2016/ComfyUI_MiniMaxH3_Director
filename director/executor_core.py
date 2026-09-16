@@ -556,6 +556,35 @@ def execute_director_plan_core(
     segment_export_lengths: dict[int, int] = {}
     export_segments_mode = plan.export_mode == "segments"
 
+    # ── External prev-video injection (段间引导：外部视频) ─────────────
+    # When plan.external_prev_video is set, inject its frames as "segment 0"
+    # output so that segment 2+ can use its tail as motion context without
+    # requiring the Director to have generated segment 1 first.
+    ext_video = getattr(plan, "external_prev_video", None)
+    if ext_video is not None and isinstance(ext_video, torch.Tensor) and ext_video.ndim == 4 and int(ext_video.shape[0]) >= 5:
+        ext_frames = fit_canvas(ext_video.float(), plan.width, plan.height)
+        completed_outputs[0] = ext_frames
+        completed_av_handoff[0] = {
+            "trim_frames": 0,
+            "export_frames": int(ext_frames.shape[0]),
+            "sample_frames": int(ext_frames.shape[0]),
+        }
+        reports.append(
+            f"External prev video injected: {int(ext_frames.shape[0])} frames "
+            f"({int(ext_frames.shape[2])}×{int(ext_frames.shape[1])}) → "
+            "segment #2+ motion context source."
+        )
+        log.info(
+            "Director: external prev video injected (%d frames %dx%d) as segment 0 output.",
+            int(ext_frames.shape[0]), int(ext_frames.shape[2]), int(ext_frames.shape[1]),
+        )
+    elif ext_video is not None:
+        log.warning(
+            "Director: external_prev_video ignored — expected [T,H,W,C] float tensor "
+            "with T>=5, got shape %s.",
+            getattr(ext_video, "shape", None),
+        )
+
     def _run_one_segment(
         seg, *, progress_index: int
     ) -> tuple[torch.Tensor, dict[str, Any] | None, torch.Tensor]:

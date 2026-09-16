@@ -103,6 +103,18 @@ class MiniMaxH3Director:
                         ),
                     },
                 ),
+                "external_prev_video": (
+                    "IMAGE",
+                    {
+                        "tooltip": (
+                            "可选。外部上一段视频帧，用于段间引导（motion context）。"
+                            "连接 Load Video 等节点的 IMAGE 输出。"
+                            "启用后，第 2 段及后续段将参考此外部视频的尾部帧生成，"
+                            "而非依赖 Director 自身生成的上一段缓存。"
+                            "需在导演台面板开启「段间引导」。"
+                        ),
+                    },
+                ),
                 "bd_grp_advanced": ("BDGROUP", {"default": "高级采样"}),
                 "steps": (
                     "INT",
@@ -219,6 +231,7 @@ class MiniMaxH3Director:
         i2v_groups=None,
         r2v_groups=None,
         refine=None,
+        external_prev_video=None,
         sigmas=None,
         steps=25,
         sampler="res_multistep",
@@ -247,6 +260,7 @@ class MiniMaxH3Director:
             i2v_groups=i2v_groups,
             r2v_groups=r2v_groups,
             refine=refine,
+            external_prev_video=external_prev_video,
         )
 
         try:
