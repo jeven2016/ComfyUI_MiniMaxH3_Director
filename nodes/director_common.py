@@ -168,6 +168,35 @@ def default_timeline_json(
     )
 
 
+# Official example pairs a 22-frame video context with 24 audio frames.
+MIN_EXT_VIDEO_OVERLAP = 22
+
+
+def _apply_external_prev_video(plan, external_prev_video):
+    """Attach the wired external prev-video and make「段间引导」usable with it.
+
+    Without this the input silently does nothing: a plan that reaches here with
+    the checkbox off never enters the guidance path, and a context window below
+    the official baseline is too short to guide from.
+    """
+    plan.external_prev_video = external_prev_video
+    if external_prev_video is None:
+        return
+    if not plan.continuity_enabled:
+        plan.continuity_enabled = True
+        log.info("Director: external_prev_video connected — auto-enabled 段间引导.")
+    prior = int(plan.continuity_overlap_frames or 0)
+    if prior < MIN_EXT_VIDEO_OVERLAP:
+        from ..director.h3_motion_context import snap_context_frames
+
+        plan.continuity_overlap_frames = snap_context_frames(MIN_EXT_VIDEO_OVERLAP)
+        log.info(
+            "Director: external_prev_video overlap raised to %d frames (was %d).",
+            plan.continuity_overlap_frames,
+            prior,
+        )
+
+
 def prepare_director_plan(
     *,
     timeline_data: str,
@@ -225,7 +254,7 @@ def prepare_director_plan(
             ref_max_size=ref_max_size,
         )
         plan = _attach_refine(plan, refine)
-        plan.external_prev_video = external_prev_video
+        _apply_external_prev_video(plan, external_prev_video)
         log.info(
             "MiniMax H3 Director: external %s groups × %d (task=%s) | %s",
             family,
@@ -252,7 +281,7 @@ def prepare_director_plan(
         ref_max_size=ref_max_size,
     )
     plan = _attach_refine(plan, refine)
-    plan.external_prev_video = external_prev_video
+    _apply_external_prev_video(plan, external_prev_video)
     log.info(plan_summary(plan).replace("\n", " | "))
     return plan
 

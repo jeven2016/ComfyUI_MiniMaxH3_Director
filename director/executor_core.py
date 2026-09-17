@@ -10,6 +10,11 @@ from typing import Any
 import torch
 
 from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_edge, limit_ref_image_dict
+from ..lib.ref_videos import (
+    MAX_REFERENCE_VIDEOS,
+    REF_VIDEO_KEY_PREFIX,
+    reference_video_prompt_tag,
+)
 from ..lib.task_modes import SUPPORTED_TASK_KEYS
 from ..nodes.conditioning import run_minimax_conditioning
 from .core_sampling import ShiftedModelCache, sample_single_stage
@@ -556,27 +561,23 @@ def execute_director_plan_core(
     segment_export_lengths: dict[int, int] = {}
     export_segments_mode = plan.export_mode == "segments"
 
-    # ── External prev-video injection (段间引导：外部视频) ─────────────
-    # When plan.external_prev_video is set, inject its frames as "segment 0"
-    # output so that segment 2+ can use its tail as motion context without
-    # requiring the Director to have generated segment 1 first.
+    # ── External prev-video (段间引导：外部视频) ─────────────────────
+    # The external video is segment #1's predecessor, not a stand-in for a
+    # generated segment.  It is resolved on demand in
+    # ``resolve_prev_segment_output`` so it can never shadow a real segment #1
+    # (in memory or on disk).  Segments #2+ chain from the segment before them,
+    # which is what makes a multi-segment plan continue the external video
+    # instead of restarting from it on every segment.
     ext_video = getattr(plan, "external_prev_video", None)
     if ext_video is not None and isinstance(ext_video, torch.Tensor) and ext_video.ndim == 4 and int(ext_video.shape[0]) >= 5:
-        ext_frames = fit_canvas(ext_video.float(), plan.width, plan.height)
-        completed_outputs[0] = ext_frames
-        completed_av_handoff[0] = {
-            "trim_frames": 0,
-            "export_frames": int(ext_frames.shape[0]),
-            "sample_frames": int(ext_frames.shape[0]),
-        }
         reports.append(
-            f"External prev video injected: {int(ext_frames.shape[0])} frames "
-            f"({int(ext_frames.shape[2])}×{int(ext_frames.shape[1])}) → "
-            "segment #2+ motion context source."
+            f"External prev video: {int(ext_video.shape[0])} frames "
+            f"({int(ext_video.shape[2])}×{int(ext_video.shape[1])}) → "
+            "segment #1 motion context source."
         )
         log.info(
-            "Director: external prev video injected (%d frames %dx%d) as segment 0 output.",
-            int(ext_frames.shape[0]), int(ext_frames.shape[2]), int(ext_frames.shape[1]),
+            "Director: external prev video ready (%d frames %dx%d) as segment #1 predecessor.",
+            int(ext_video.shape[0]), int(ext_video.shape[2]), int(ext_video.shape[1]),
         )
     elif ext_video is not None:
         log.warning(
@@ -719,6 +720,11 @@ def execute_director_plan_core(
                     "上一段无有效缓存，已跳过段间引导"
                     "（重跑上一段或将其纳入「选择运行」可恢复衔接）"
                 )
+            elif prev_idx < 0:
+                reports.append(
+                    f"Segment {seg.index + 1}/{timeline_seg_total}: "
+                    "引导接自外接视频（段间引导）"
+                )
             elif not prev_from_this_run:
                 reports.append(
                     f"Segment {seg.index + 1}/{timeline_seg_total}: "
@@ -815,6 +821,63 @@ def execute_director_plan_core(
             # Cached first-pass latent already has its original pin; don't rebuild MC.
             use_motion_context = False
         # OFF → context_n=0 → sample_len == official segment length only.
+
+        # ── External video: expose the frames to official conditioning ───
+        # Motion context only injects latent blocks — the model never sees the
+        # actual video content.  r2v/v2v/rv2v therefore also hand the external
+        # tail to the official ReferenceToVideo slots.
+        # i2v/t2v have no multi-frame visual input: their multi-frame path is
+        # the motion-context tail pin above.  Rewriting first_frame from the
+        # external tail would cap it at a single frame and switch that pin off.
+        if ext_video is not None and prev_tail is not None and isinstance(prev_tail, torch.Tensor):
+            _ext_n = int(prev_tail.shape[0])
+            if seg.task_key in {"r2v", "v2v", "rv2v"} and _ext_n >= 5:
+                # Never clobber a slot the segment already owns: v2v/rv2v keep the
+                # source clip on ref_video_0, r2v keeps its own reference video.
+                ref_videos = dict(ref_videos or {})
+                slot = next(
+                    (
+                        i
+                        for i in range(MAX_REFERENCE_VIDEOS)
+                        if f"{REF_VIDEO_KEY_PREFIX}{i}" not in ref_videos
+                    ),
+                    None,
+                )
+                if slot is None:
+                    log.warning(
+                        "Director: external video skipped for %s (seg #%d) — all %d "
+                        "reference-video slots are taken.",
+                        seg.task_key, seg.index + 1, MAX_REFERENCE_VIDEOS,
+                    )
+                else:
+                    ref_videos[f"{REF_VIDEO_KEY_PREFIX}{slot}"] = prev_tail
+                    tag = reference_video_prompt_tag(slot)
+                    if tag not in positive_prompt:
+                        positive_prompt = f"{tag} {positive_prompt}"
+                    log.info(
+                        "Director: external video %d frames → %s%d (%s) for %s (seg #%d).",
+                        _ext_n, REF_VIDEO_KEY_PREFIX, slot, tag,
+                        seg.task_key, seg.index + 1,
+                    )
+            elif seg.task_key in {"r2v", "v2v", "rv2v"}:
+                log.warning(
+                    "Director: external video skipped for %s (seg #%d) — %d frames is "
+                    "below the 5-frame ReferenceToVideo minimum.",
+                    seg.task_key, seg.index + 1, _ext_n,
+                )
+            elif use_motion_context:
+                log.info(
+                    "Director: external video %d tail frames → motion context for %s "
+                    "(seg #%d); i2v/t2v have no multi-frame reference slot.",
+                    _ext_n, seg.task_key, seg.index + 1,
+                )
+            else:
+                log.info(
+                    "Director: external video unused for %s (seg #%d) — this segment "
+                    "keeps its own start anchor.",
+                    seg.task_key, seg.index + 1,
+                )
+
         context_n = snap_context_frames(plan.continuity_overlap_frames) if use_motion_context else 0
         sample_len, _planned_trim = generation_frame_budget(num_frames, context_n)
         if use_motion_context:

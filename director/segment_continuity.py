@@ -356,7 +356,27 @@ def is_continuity_active(plan: DirectorPlan, seg: SegmentPlan) -> bool:
     (stock ImageToVideo / ReferenceToVideo, no motion-context pin/patch/trim).
     Supported tasks: t2v / i2v / fl2v / r2v / v2v / rv2v.
     Per-segment ``continuity_from_prev`` (default True) can opt out while master is on.
+
+    External prev-video override: when ``plan.external_prev_video`` is set,
+    segment #1 (index 0) pins from it in place of a ``segment_count >= 2``
+    predecessor.  This lets users wire a Load Video → Director
+    external_prev_video input for inter-segment guidance without having to
+    create a second segment.  Continuity is auto-enabled for it.
     """
+    has_ext = getattr(plan, "external_prev_video", None) is not None
+    # External prev-video: segment #1 (index 0) pins from the wired external
+    # video, which is its predecessor.  Segments #2+ are unaffected — they chain
+    # from the segment before them, so a multi-segment plan continues the
+    # external video instead of restarting from it on every segment.
+    # ``seg.continuity_from_prev`` must stay out of this branch: it is False for
+    # index 0 by construction (``resolve_segment_continuity_from_prev`` returns
+    # False for ``segment_index <= 0``, "Segment index 0 never pins"), which would
+    # make this branch — entered only for ``seg.index == 0`` — unreachable.
+    if has_ext and seg.index == 0:
+        return (
+            plan.continuity_enabled
+            and seg.task_key in CONTINUITY_TASK_KEYS
+        )
     return (
         plan.continuity_enabled
         and plan.segment_count >= 2
@@ -376,6 +396,20 @@ def is_continuity_lead_segment(plan: DirectorPlan, seg: SegmentPlan) -> bool:
     )
 
 
+def external_prev_frames(plan: DirectorPlan) -> torch.Tensor | None:
+    """Canvas-fitted frames of the wired external previous video, or None.
+
+    This is segment #1's predecessor when ``external_prev_video`` is connected:
+    the Director has generated nothing before it, so the external video *is* the
+    previous segment.  Later segments are unaffected and keep chaining from the
+    segment before them.
+    """
+    ext = getattr(plan, "external_prev_video", None)
+    if not isinstance(ext, torch.Tensor) or ext.ndim != 4 or int(ext.shape[0]) < 5:
+        return None
+    return fit_canvas(ext.float(), plan.width, plan.height)
+
+
 def resolve_prev_segment_output(
     plan: DirectorPlan,
     all_segments: list[SegmentPlan],
@@ -385,6 +419,9 @@ def resolve_prev_segment_output(
 ) -> torch.Tensor | None:
     prev_idx = seg_index - 1
     if prev_idx < 0:
+        # Segment #1: no Director-generated predecessor — the external video is it.
+        if seg_index == 0 and plan.continuity_enabled:
+            return external_prev_frames(plan)
         return None
     if prev_idx in completed:
         return completed[prev_idx]
@@ -396,6 +433,14 @@ def resolve_prev_segment_output(
         return cached
     if not plan.continuity_enabled:
         return None
+    if prev_idx == 0:
+        # Segment #2 while segment #1 was never generated (neither this run nor
+        # on disk): keep「不必先生成第 1 段」working by continuing straight from
+        # the external video instead of failing the queue.  Only reached when no
+        # real segment #1 exists, so it cannot shadow a generated one.
+        ext = external_prev_frames(plan)
+        if ext is not None:
+            return ext
     raise ValueError(
         f"段间连贯：片段 #{seg_index + 1} 需要上一段 #{prev_idx + 1} 的生成结果。"
         "换源后旧缓存已失效。请先运行上一段，或将其纳入「选择运行」；"
